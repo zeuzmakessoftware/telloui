@@ -7,6 +7,7 @@ from flask import Flask, Response, request
 import time
 import torch
 import os
+import simpleaudio as sa
 
 # === YOLOv5 Model Setup ===
 base = os.path.dirname(__file__)
@@ -16,6 +17,11 @@ if not os.path.isdir(repo) or not os.path.isfile(weights):
     raise FileNotFoundError("Missing yolov5/ or yolov5s.pt")
 os.environ['YOLOv5_SKIP_UPDATE'] = '1'
 model = torch.hub.load(repo, 'custom', path=weights, source='local')
+
+# === Sound Setup ===
+sound_path = os.path.join(base, 'THEREISAPERSONHERE2.wav')
+last_sound_time = 0
+sound_cooldown = 2  # seconds
 
 TARGET_FPS = 30
 interval = 1.0 / TARGET_FPS
@@ -82,11 +88,16 @@ def receive_video():
             with frame_lock:
                 latest_frame = frame.to_ndarray(format='bgr24')
 
+# === MODIFIED process_frames FUNCTION ===
 def process_frames():
     global latest_frame, processed_frame, model, autonomous_tracking
+    global last_sound_time
+
     last_detect = 0.0
     FPS_DETECT = 5
     display_w = 480
+    MIN_BOX_WIDTH = 100  # Minimum width in pixels to consider moving forward
+    MAX_BOX_WIDTH = 300  # Maximum width before we consider the person too close
 
     while True:
         current_time = time.time()
@@ -95,13 +106,16 @@ def process_frames():
                 time.sleep(0.01)
                 continue
             frame = latest_frame.copy()
-        
+
         H, W = frame.shape[:2]
         small = cv2.resize(frame, (display_w, int(H * display_w / W)))
         results = model(small)
         dets = results.xyxy[0].cpu().numpy()
 
         weapons = []
+        detected_person = False
+        person_box_size = 0  # Track the size of detected person
+
         for x1, y1, x2, y2, conf, cls in dets:
             if int(cls) in [0, 1, 2] and conf > 0.5:
                 fx, fy = W / display_w, H / small.shape[0]
@@ -109,8 +123,35 @@ def process_frames():
                 y1 = y1 * fy
                 x2 = x2 * fx
                 y2 = y2 * fy
+                box_width = x2 - x1
+                box_height = y2 - y1
+                
                 cv2.rectangle(frame, (int(x1), int(y1)), (int(x2), int(y2)), (0, 0, 255), 2)
+
+                if int(cls) == 0:  # Person class
+                    detected_person = True
+                    person_box_size = box_width  # Store width of person bounding box
+                    # Display size information
+                    cv2.putText(frame, f"Size: {int(box_width)}px", (int(x1), int(y1) - 10), 
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+
                 weapons.append((x1, y1, x2, y2, conf, cls))
+
+        # === Play sound if a person is detected and cooldown passed ===
+        if detected_person and (time.time() - last_sound_time > sound_cooldown):
+            try:
+                wave_obj = sa.WaveObject.from_wave_file(sound_path)
+                wave_obj.play()
+                
+                # Only move forward if person box is between min and max size
+                if MIN_BOX_WIDTH < person_box_size < MAX_BOX_WIDTH:
+                    send_command("forward 30")
+                else:
+                    print(f"[SAFETY] Person box size {person_box_size}px outside safe range ({MIN_BOX_WIDTH}-{MAX_BOX_WIDTH}px)")
+                
+                last_sound_time = time.time()
+            except Exception as e:
+                print(f"[AUDIO ERROR] {e}")
 
         with processed_frame_lock:
             processed_frame = frame.copy()
@@ -129,7 +170,7 @@ def process_frames():
 
                     if abs(off) > center_tol:
                         cmd = 'cw 15' if off > 0 else 'ccw 15'
-                    elif (bw / W) < size_thresh:
+                    elif (bw / W) < size_thresh and MIN_BOX_WIDTH < bw < MAX_BOX_WIDTH:
                         cmd = 'forward 30'
                     else:
                         cmd = None
