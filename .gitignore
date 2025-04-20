@@ -2,3 +2,7 @@ venv
 __pycache__
 
 Tello3.py
+
+# Bring your own weights pls
+yolov5
+yolov5s.pt
